@@ -1,0 +1,6 @@
+{
+  "name": "Gym Mini App",
+  "description": "Premium Telegram Mini App for tracking gym progress, training history, body measurements, and custom muscle exercises.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
