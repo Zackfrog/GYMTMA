@@ -335,7 +335,7 @@ export default function App() {
   const handleSelectExerciseToLog = (exerciseName: string, categoryName: string) => {
     setLoggingExercise({ name: exerciseName, category: categoryName });
     // Look up if this exercise was already added in current workout to restore sets, else start fresh
-    const existing = activeWorkout?.exercises.find(e => e.name === exerciseName);
+    const existing = activeWorkout?.exercises?.find(e => e.name === exerciseName);
     if (existing) {
       setCurrentSets([...existing.sets]);
       if (existing.sets.length > 0) {
@@ -406,7 +406,7 @@ export default function App() {
   const handleSaveExerciseToWorkout = async () => {
     if (!activeWorkout || !loggingExercise) return;
 
-    const updatedExercises = [...activeWorkout.exercises];
+    const updatedExercises = activeWorkout.exercises ? [...activeWorkout.exercises] : [];
     const existingIndex = updatedExercises.findIndex(e => e.name === loggingExercise.name);
 
     if (existingIndex >= 0) {
@@ -646,7 +646,7 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="space-y-3 max-h-[220px] overflow-y-auto pr-1">
-                        {activeWorkout.exercises.map((ex, exIdx) => (
+                        {(activeWorkout.exercises || []).map((ex, exIdx) => (
                           <div key={exIdx} className="bg-[#121212] border border-[#1c1c1c] rounded-xl p-3 space-y-2">
                             <div className="flex justify-between items-center">
                               <span className="font-bold text-xs text-white">{ex.name}</span>
@@ -883,11 +883,11 @@ export default function App() {
 
                 {/* Exercises list */}
                 <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
-                  {selectedCategory.exercises.length === 0 ? (
+                  {!selectedCategory.exercises || selectedCategory.exercises.length === 0 ? (
                     <p className="text-xs text-gray-500 text-center py-6">В этой категории еще нет упражнений</p>
                   ) : (
-                    selectedCategory.exercises.map((ex, index) => {
-                      const isLogged = activeWorkout?.exercises.some(e => e.name === ex);
+                    (selectedCategory.exercises || []).map((ex, index) => {
+                      const isLogged = activeWorkout?.exercises?.some(e => e.name === ex) || false;
                       return (
                         <div
                           key={index}
