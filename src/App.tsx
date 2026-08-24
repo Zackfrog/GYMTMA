@@ -822,7 +822,7 @@ export default function App() {
                         </span>
                         <span className="text-sm font-semibold text-white">{cat.name}</span>
                         <span className="text-[10px] text-gray-500 uppercase tracking-wider block pt-1">
-                          {cat.exercises.length} упр.
+                          {(cat.exercises || []).length} упр.
                         </span>
                       </button>
                     </div>
