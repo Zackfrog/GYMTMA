@@ -52,21 +52,51 @@ function initLocalDB() {
 
 initLocalDB();
 
+let memoryDB: any = null;
+
 // Read/Write Local DB Helpers
 function readLocalDB() {
   initLocalDB();
   try {
     const data = fs.readFileSync(DB_FILE, "utf8");
-    return JSON.parse(data);
+    if (!data || data.trim() === "") {
+      throw new Error("Empty database file");
+    }
+    const parsed = JSON.parse(data);
+    memoryDB = parsed;
+    return parsed;
   } catch (err) {
-    console.error("Error reading local db, returning default:", err);
-    return { workouts: [], measurements: [], categories: [] };
+    console.error("Error reading local db, returning memory cache or default:", err);
+    if (memoryDB) {
+      return memoryDB;
+    }
+    const defaultDB = {
+      workouts: [],
+      measurements: [],
+      categories: [
+        { id: "back", name: "Спина", icon: "🏔️", exercises: ["Подтягивания", "Тяга верхнего блока", "Тяга штанги в наклоне", "Гиперэкстензия"] },
+        { id: "chest", name: "Грудь", icon: "🐃", exercises: ["Жим штанги лежа", "Жим гантелей под углом", "Отжимания", "Разведение гантелей"] },
+        { id: "legs", name: "Ноги", icon: "🦿", exercises: ["Приседания со штангой", "Жим ногами", "Выпады", "Разгибание ног в тренажере"] },
+        { id: "shoulders", name: "Плечи", icon: "🏛️", exercises: ["Армейский жим", "Махи гантелями в стороны", "Подъем гантелей перед собой"] },
+        { id: "biceps", name: "Бицепс", icon: "💪", exercises: ["Подъем штанги на бицепс", "Молотковые сгибания", "Концентрированный подъем"] },
+        { id: "triceps", name: "Трицепс", icon: "⚡", exercises: ["Жим лежа узким хватом", "Разгибание рук на блоке", "Французский жим"] }
+      ]
+    };
+    try {
+      fs.writeFileSync(DB_FILE, JSON.stringify(defaultDB, null, 2), "utf8");
+    } catch (writeErr) {
+      console.error("Failed to recover DB file:", writeErr);
+    }
+    return defaultDB;
   }
 }
 
 function writeLocalDB(data: any) {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
+    memoryDB = data;
+    const tempFile = DB_FILE + ".tmp";
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tempFile, DB_FILE);
   } catch (err) {
     console.error("Error writing to local db:", err);
   }
@@ -108,14 +138,24 @@ app.get("/api/user-stats/:userId", async (req, res) => {
   let workouts = [];
   if (supabase) {
     try {
+      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
       const { data, error } = await supabase
         .from("workouts")
         .select("*")
-        .eq("user_id", userId)
+        .eq("user_id", parsedUserId)
         .order("start_time", { ascending: false });
 
       if (error) throw error;
-      workouts = data || [];
+      const supWorkouts = (data || []).map((supW: any) => {
+        const localW = localDB.workouts.find((lw: any) => String(lw.id) === String(supW.id));
+        return {
+          ...supW,
+          exercises: supW.exercises || (localW ? localW.exercises : [])
+        };
+      });
+      const supIds = new Set(supWorkouts.map((w: any) => String(w.id)));
+      const localOnly = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId) && !supIds.has(String(w.id)));
+      workouts = [...supWorkouts, ...localOnly];
     } catch (err) {
       console.warn("Supabase fetch stats failed, using local fallback", err);
       workouts = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId));
@@ -187,7 +227,14 @@ app.get("/api/categories", async (req, res) => {
       const { data, error } = await supabase.from("categories").select("*");
       if (error) throw error;
       if (data && data.length > 0) {
-        return res.json(data);
+        const merged = data.map((supCat: any) => {
+          const localCat = localDB.categories.find((lc: any) => String(lc.id) === String(supCat.id));
+          return {
+            ...supCat,
+            exercises: supCat.exercises || (localCat ? localCat.exercises : [])
+          };
+        });
+        return res.json(merged);
       }
     } catch (err) {
       console.warn("Supabase fetch categories failed, using local fallback", err);
@@ -200,30 +247,74 @@ app.get("/api/categories", async (req, res) => {
 app.post("/api/categories/exercise", async (req, res) => {
   const { categoryId, exerciseName, action } = req.body; // action: 'add' | 'remove'
   const localDB = readLocalDB();
+  let category: any = null;
 
-  const category = localDB.categories.find((c: any) => c.id === categoryId);
+  // 1. Try to find the category in Supabase first
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("categories")
+        .select("*")
+        .eq("id", categoryId)
+        .maybeSingle();
+      if (!error && data) {
+        category = data;
+      }
+    } catch (err) {
+      console.warn("Failed to fetch category from Supabase, falling back to local:", err);
+    }
+  }
+
+  // 2. Fall back to local DB if not found in Supabase
+  if (!category) {
+    category = localDB.categories.find((c: any) => String(c.id) === String(categoryId));
+  }
+
   if (!category) {
     return res.status(404).json({ error: "Category not found" });
   }
 
+  // 3. Extract and sanitize exercises array
+  let exercises = Array.isArray(category.exercises) ? category.exercises : [];
+
   if (action === "add") {
-    if (!category.exercises.includes(exerciseName)) {
-      category.exercises.push(exerciseName);
+    if (!exercises.includes(exerciseName)) {
+      exercises.push(exerciseName);
     }
   } else if (action === "remove") {
-    category.exercises = category.exercises.filter((ex: string) => ex !== exerciseName);
+    exercises = exercises.filter((ex: string) => ex !== exerciseName);
   }
 
+  category.exercises = exercises;
+
+  // 4. Update local DB
+  const localIndex = localDB.categories.findIndex((c: any) => String(c.id) === String(category.id));
+  if (localIndex >= 0) {
+    localDB.categories[localIndex] = { ...localDB.categories[localIndex], exercises };
+  } else {
+    localDB.categories.push({ id: category.id, name: category.name, icon: category.icon, exercises });
+  }
   writeLocalDB(localDB);
 
+  // 5. Update Supabase
   if (supabase) {
     try {
       const { error } = await supabase
         .from("categories")
-        .upsert({ id: category.id, name: category.name, icon: category.icon, exercises: category.exercises });
+        .upsert({ id: category.id, name: category.name, icon: category.icon, exercises });
       if (error) throw error;
-    } catch (err) {
-      console.warn("Supabase upsert category failed", err);
+    } catch (err: any) {
+      console.warn("Supabase upsert category failed during exercise update, retrying without exercises column:", err);
+      if (err?.message?.includes("exercises") || err?.code === "PGRST204") {
+        try {
+          await supabase
+            .from("categories")
+            .upsert({ id: category.id, name: category.name, icon: category.icon });
+          console.log("Supabase upsert category retry (without exercises) succeeded!");
+        } catch (retryErr) {
+          console.error("Supabase upsert category retry failed:", retryErr);
+        }
+      }
     }
   }
 
@@ -255,8 +346,18 @@ app.post("/api/categories/create", async (req, res) => {
         .from("categories")
         .insert(newCategory);
       if (error) throw error;
-    } catch (err) {
-      console.warn("Supabase category insert failed, using local", err);
+    } catch (err: any) {
+      console.warn("Supabase category insert failed, retrying without exercises column:", err);
+      if (err?.message?.includes("exercises") || err?.code === "PGRST204") {
+        try {
+          await supabase
+            .from("categories")
+            .insert({ id: newCategory.id, name: newCategory.name, icon: newCategory.icon });
+          console.log("Supabase category insert retry (without exercises) succeeded!");
+        } catch (retryErr) {
+          console.error("Supabase category insert retry failed:", retryErr);
+        }
+      }
     }
   }
 
@@ -319,29 +420,43 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
 
   if (supabase) {
     try {
+      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
       // First cancel existing active
       await supabase
         .from("workouts")
         .update({ status: "cancelled", end_time: new Date().toISOString() })
-        .eq("user_id", userId)
+        .eq("user_id", parsedUserId)
         .eq("status", "active");
 
       const { data, error } = await supabase
         .from("workouts")
         .insert({
           id: newWorkout.id,
-          user_id: newWorkout.user_id,
+          user_id: parsedUserId,
           start_time: newWorkout.start_time,
           status: newWorkout.status,
           muscle_groups: newWorkout.muscle_groups,
           exercises: newWorkout.exercises
-        })
-        .select()
-        .single();
+        });
 
       if (error) throw error;
-    } catch (err) {
-      console.warn("Supabase insert workout failed, using local", err);
+    } catch (err: any) {
+      console.warn("Supabase insert workout failed, retrying without exercises column:", err);
+      try {
+        const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
+        await supabase
+          .from("workouts")
+          .insert({
+            id: newWorkout.id,
+            user_id: parsedUserId,
+            start_time: newWorkout.start_time,
+            status: newWorkout.status,
+            muscle_groups: newWorkout.muscle_groups
+          });
+        console.log("Supabase insert workout retry (without exercises) succeeded!");
+      } catch (retryErr) {
+        console.error("Supabase insert workout retry failed:", retryErr);
+      }
     }
   }
 
@@ -411,8 +526,22 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
         })
         .eq("id", workoutId);
       if (error) throw error;
-    } catch (err) {
-      console.warn("Supabase finish workout failed", err);
+    } catch (err: any) {
+      console.warn("Supabase finish workout failed, retrying without exercises column:", err);
+      if (err?.message?.includes("exercises") || err?.code === "PGRST204") {
+        try {
+          await supabase
+            .from("workouts")
+            .update({
+              status: "finished",
+              end_time: endTime
+            })
+            .eq("id", workoutId);
+          console.log("Supabase finish workout retry (without exercises) succeeded!");
+        } catch (retryErr) {
+          console.error("Supabase finish workout retry failed:", retryErr);
+        }
+      }
     }
   }
 
@@ -456,14 +585,24 @@ app.get("/api/workouts/:userId", async (req, res) => {
   let workouts = [];
   if (supabase) {
     try {
+      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
       const { data, error } = await supabase
         .from("workouts")
         .select("*")
-        .eq("user_id", userId)
+        .eq("user_id", parsedUserId)
         .order("start_time", { ascending: false });
 
       if (error) throw error;
-      workouts = data || [];
+      const supWorkouts = (data || []).map((supW: any) => {
+        const localW = localDB.workouts.find((lw: any) => String(lw.id) === String(supW.id));
+        return {
+          ...supW,
+          exercises: supW.exercises || (localW ? localW.exercises : [])
+        };
+      });
+      const supIds = new Set(supWorkouts.map((w: any) => String(w.id)));
+      const localOnly = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId) && !supIds.has(String(w.id)));
+      workouts = [...supWorkouts, ...localOnly];
     } catch (err) {
       console.warn("Supabase fetch workouts failed, using local", err);
       workouts = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId));
