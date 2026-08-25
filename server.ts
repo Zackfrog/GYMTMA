@@ -401,8 +401,8 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
   const userId = req.params.userId;
   const { muscleGroups } = req.body; // array of strings (e.g. ["Грудь", "Трицепс"])
 
-  const newWorkout = {
-    id: String(Date.now()),
+  const newWorkout: any = {
+    id: String(Date.now()), // default temporary ID in case Supabase is off
     user_id: userId,
     start_time: new Date().toISOString(),
     end_time: null,
@@ -410,6 +410,62 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
     muscle_groups: muscleGroups || [],
     exercises: [] // empty list of logged exercises
   };
+
+  if (supabase) {
+    try {
+      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
+      // First cancel existing active in Supabase
+      await supabase
+        .from("workouts")
+        .update({ status: "cancelled", end_time: new Date().toISOString() })
+        .eq("user_id", parsedUserId)
+        .eq("status", "active");
+
+      // Insert WITHOUT specifying 'id' so Supabase auto-generates a valid serial id
+      const { data, error } = await supabase
+        .from("workouts")
+        .insert({
+          user_id: parsedUserId,
+          start_time: newWorkout.start_time,
+          status: newWorkout.status,
+          muscle_groups: newWorkout.muscle_groups,
+          exercises: newWorkout.exercises
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      
+      if (data && data.id) {
+        newWorkout.id = String(data.id);
+        console.log(`Supabase generated workout ID: ${newWorkout.id}`);
+      }
+    } catch (err: any) {
+      console.warn("Supabase insert workout failed, retrying without exercises column:", err);
+      try {
+        const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
+        const { data, error } = await supabase
+          .from("workouts")
+          .insert({
+            user_id: parsedUserId,
+            start_time: newWorkout.start_time,
+            status: newWorkout.status,
+            muscle_groups: newWorkout.muscle_groups
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data && data.id) {
+          newWorkout.id = String(data.id);
+          console.log(`Supabase generated workout ID (retry): ${newWorkout.id}`);
+        }
+        console.log("Supabase insert workout retry (without exercises) succeeded!");
+      } catch (retryErr) {
+        console.error("Supabase insert workout retry failed:", retryErr);
+      }
+    }
+  }
 
   const localDB = readLocalDB();
   
@@ -423,48 +479,6 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
 
   localDB.workouts.push(newWorkout);
   writeLocalDB(localDB);
-
-  if (supabase) {
-    try {
-      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
-      // First cancel existing active
-      await supabase
-        .from("workouts")
-        .update({ status: "cancelled", end_time: new Date().toISOString() })
-        .eq("user_id", parsedUserId)
-        .eq("status", "active");
-
-      const { data, error } = await supabase
-        .from("workouts")
-        .insert({
-          id: newWorkout.id,
-          user_id: parsedUserId,
-          start_time: newWorkout.start_time,
-          status: newWorkout.status,
-          muscle_groups: newWorkout.muscle_groups,
-          exercises: newWorkout.exercises
-        });
-
-      if (error) throw error;
-    } catch (err: any) {
-      console.warn("Supabase insert workout failed, retrying without exercises column:", err);
-      try {
-        const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
-        await supabase
-          .from("workouts")
-          .insert({
-            id: newWorkout.id,
-            user_id: parsedUserId,
-            start_time: newWorkout.start_time,
-            status: newWorkout.status,
-            muscle_groups: newWorkout.muscle_groups
-          });
-        console.log("Supabase insert workout retry (without exercises) succeeded!");
-      } catch (retryErr) {
-        console.error("Supabase insert workout retry failed:", retryErr);
-      }
-    }
-  }
 
   // Send Telegram Notification
   const muscles = muscleGroups && muscleGroups.length > 0 ? muscleGroups.join(", ") : "Тренировка";
