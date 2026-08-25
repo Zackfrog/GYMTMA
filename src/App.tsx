@@ -316,7 +316,7 @@ export default function App() {
       onConfirm: async () => {
         if (!activeWorkout) return;
         try {
-          const res = await axios.post(`/api/workouts/finish/${activeWorkout.id}`, {
+          await axios.post(`/api/workouts/finish/${activeWorkout.id}`, {
             exercises: activeWorkout.exercises
           });
           setActiveWorkout(null);
@@ -325,7 +325,12 @@ export default function App() {
           setTab("home");
           loadData();
         } catch (err) {
-          console.error("Failed to finish workout:", err);
+          console.error("Failed to finish workout, gracefully resetting local state:", err);
+          setActiveWorkout(null);
+          setSelectedMuscleGroups([]);
+          setConfirmModal(prev => ({ ...prev, show: false }));
+          setTab("home");
+          loadData();
         }
       }
     });
@@ -1484,7 +1489,7 @@ export default function App() {
                   onClick={() => setConfirmModal(prev => ({ ...prev, show: false }))}
                   className="flex-1 bg-[#1a1a1a] border border-[#2c2c2c] text-white py-3 rounded-xl font-bold text-sm hover:bg-[#222] transition-all"
                 >
-                  {confirmModal.type === "start" ? "Отмена" : "Продолжить"}
+                  Отмена
                 </button>
                 <button
                   onClick={confirmModal.onConfirm}

@@ -157,11 +157,42 @@ function mapSupabaseWorkout(supW: any, localDB: any) {
     muscle_groups = (localW && localW.muscle_groups) ? localW.muscle_groups : [];
   }
   
+  // Deriving status dynamically if missing from database
+  const status = supW.status || (supW.end_time ? "finished" : "active");
+  
   return {
     ...supW,
+    status,
     muscle_groups,
     exercises: supW.exercises || (localW ? localW.exercises : [])
   };
+}
+
+// Fetch from localDB or download from Supabase if missing (e.g. after server restart)
+async function getOrFetchWorkout(workoutId: string, localDB: any): Promise<any> {
+  let workout = localDB.workouts.find((w: any) => String(w.id) === String(workoutId));
+  if (workout) return workout;
+
+  if (supabase) {
+    try {
+      const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
+      const { data, error } = await supabase
+        .from("workouts")
+        .select("*")
+        .eq("id", parsedWorkoutId)
+        .maybeSingle();
+
+      if (!error && data) {
+        const mapped = mapSupabaseWorkout(data, localDB);
+        localDB.workouts.push(mapped);
+        writeLocalDB(localDB);
+        return mapped;
+      }
+    } catch (err) {
+      console.warn("Failed to fetch missing workout from Supabase:", err);
+    }
+  }
+  return null;
 }
 
 // API Routes
@@ -448,14 +479,14 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
   if (supabase) {
     try {
       const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
-      // First cancel existing active in Supabase
+      // First cancel existing active in Supabase (represented by null end_time)
       await supabase
         .from("workouts")
-        .update({ status: "cancelled", end_time: new Date().toISOString() })
+        .update({ end_time: new Date().toISOString() })
         .eq("user_id", parsedUserId)
-        .eq("status", "active");
+        .is("end_time", null);
 
-      // Insert WITHOUT specifying 'id' so Supabase auto-generates a valid serial id
+      // Insert WITHOUT specifying 'id' or 'status' so Supabase auto-generates a valid serial id
       let insertResult;
       try {
         // 1. Try clean INSERT using native 'muscle_groups' column and 'exercises'
@@ -464,7 +495,6 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
           .insert({
             user_id: parsedUserId,
             start_time: newWorkout.start_time,
-            status: newWorkout.status,
             muscle_groups: newWorkout.muscle_groups,
             exercises: newWorkout.exercises
           })
@@ -480,7 +510,6 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
             .insert({
               user_id: parsedUserId,
               start_time: newWorkout.start_time,
-              status: newWorkout.status,
               note: JSON.stringify(newWorkout.muscle_groups || []),
               exercises: newWorkout.exercises
             })
@@ -495,7 +524,6 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
             .insert({
               user_id: parsedUserId,
               start_time: newWorkout.start_time,
-              status: newWorkout.status,
               note: JSON.stringify(newWorkout.muscle_groups || [])
             })
             .select()
@@ -539,7 +567,7 @@ app.post("/api/workouts/save/:workoutId", async (req, res) => {
   const { exercises } = req.body; // array of exercises with sets
 
   const localDB = readLocalDB();
-  const workout = localDB.workouts.find((w: any) => String(w.id) === String(workoutId));
+  const workout = await getOrFetchWorkout(workoutId, localDB);
   if (!workout) {
     return res.status(404).json({ error: "Workout not found" });
   }
@@ -570,8 +598,12 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
   const endTime = new Date().toISOString();
 
   const localDB = readLocalDB();
-  const workout = localDB.workouts.find((w: any) => String(w.id) === String(workoutId));
+  const workout = await getOrFetchWorkout(workoutId, localDB);
   if (!workout) {
+    if (String(workoutId).length >= 13) {
+      console.log(`Gracefully clearing stale temporary workout session: ${workoutId}`);
+      return res.json({ id: workoutId, status: "finished", muscle_groups: [], exercises: [] });
+    }
     return res.status(404).json({ error: "Workout not found" });
   }
 
@@ -588,7 +620,6 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
       const { error } = await supabase
         .from("workouts")
         .update({
-          status: "finished",
           end_time: endTime,
           exercises: workout.exercises
         })
@@ -596,20 +627,17 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
       if (error) throw error;
     } catch (err: any) {
       console.warn("Supabase finish workout failed, retrying without exercises column:", err);
-      if (err?.message?.includes("exercises") || err?.code === "PGRST204") {
-        try {
-          const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
-          await supabase
-            .from("workouts")
-            .update({
-              status: "finished",
-              end_time: endTime
-            })
-            .eq("id", parsedWorkoutId);
-          console.log("Supabase finish workout retry (without exercises) succeeded!");
-        } catch (retryErr) {
-          console.error("Supabase finish workout retry failed:", retryErr);
-        }
+      try {
+        const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
+        await supabase
+          .from("workouts")
+          .update({
+            end_time: endTime
+          })
+          .eq("id", parsedWorkoutId);
+        console.log("Supabase finish workout retry (without exercises) succeeded!");
+      } catch (retryErr) {
+        console.error("Supabase finish workout retry failed:", retryErr);
       }
     }
   }
