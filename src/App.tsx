@@ -27,8 +27,8 @@ import { motion, AnimatePresence } from "motion/react";
 
 // Types
 interface SetData {
-  weight: number;
-  reps: number;
+  weight: number | string;
+  reps: number | string;
   completed: boolean;
 }
 
@@ -387,13 +387,9 @@ export default function App() {
     setCurrentSets(currentSets.filter((_, i) => i !== index));
   };
 
-  const handleUpdateSetField = (index: number, field: "weight" | "reps", value: number) => {
+  const handleUpdateSetField = (index: number, field: "weight" | "reps", value: string) => {
     const updated = [...currentSets];
-    if (field === "weight") {
-      updated[index].weight = Math.max(0, value);
-    } else {
-      updated[index].reps = Math.max(0, value);
-    }
+    updated[index][field] = value;
     setCurrentSets(updated);
   };
 
@@ -406,16 +402,22 @@ export default function App() {
   const handleSaveExerciseToWorkout = async () => {
     if (!activeWorkout || !loggingExercise) return;
 
+    const sanitizedSets = currentSets.map(s => ({
+      weight: parseFloat(String(s.weight)) || 0,
+      reps: parseInt(String(s.reps)) || 0,
+      completed: s.completed
+    }));
+
     const updatedExercises = activeWorkout.exercises ? [...activeWorkout.exercises] : [];
     const existingIndex = updatedExercises.findIndex(e => e.name === loggingExercise.name);
 
     if (existingIndex >= 0) {
-      updatedExercises[existingIndex].sets = currentSets;
+      updatedExercises[existingIndex].sets = sanitizedSets;
     } else {
       updatedExercises.push({
         name: loggingExercise.name,
         category: loggingExercise.category,
-        sets: currentSets
+        sets: sanitizedSets
       });
     }
 
@@ -1100,9 +1102,10 @@ export default function App() {
                           {/* Weight adjustment */}
                           <div className="flex items-center gap-1">
                             <input
-                              type="number"
+                              type="text"
+                              inputMode="decimal"
                               value={set.weight}
-                              onChange={(e) => handleUpdateSetField(i, "weight", parseFloat(e.target.value) || 0)}
+                              onChange={(e) => handleUpdateSetField(i, "weight", e.target.value)}
                               className="bg-[#1a1a1a] border border-[#2c2c2c] w-14 text-center py-1.5 rounded-lg text-sm text-white focus:outline-none focus:border-green-500"
                             />
                             <span className="text-xs text-gray-500">кг</span>
@@ -1111,9 +1114,10 @@ export default function App() {
                           {/* Reps adjustment */}
                           <div className="flex items-center gap-1">
                             <input
-                              type="number"
+                              type="text"
+                              inputMode="numeric"
                               value={set.reps}
-                              onChange={(e) => handleUpdateSetField(i, "reps", parseInt(e.target.value) || 0)}
+                              onChange={(e) => handleUpdateSetField(i, "reps", e.target.value)}
                               className="bg-[#1a1a1a] border border-[#2c2c2c] w-12 text-center py-1.5 rounded-lg text-sm text-white focus:outline-none focus:border-green-500"
                             />
                             <span className="text-xs text-gray-500">повт</span>

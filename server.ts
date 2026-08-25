@@ -177,7 +177,11 @@ app.get("/api/user-stats/:userId", async (req, res) => {
   const completedWorkouts = workouts.filter((w: any) => w.status === "finished");
   let lastWorkout: any = null;
   if (completedWorkouts.length > 0) {
-    const sorted = [...completedWorkouts].sort((a, b) => new Date(b.end_time).getTime() - new Date(a.end_time).getTime());
+    const sorted = [...completedWorkouts].sort((a, b) => {
+      const dateA = new Date(a.end_time || a.start_time || 0).getTime();
+      const dateB = new Date(b.end_time || b.start_time || 0).getTime();
+      return dateB - dateA;
+    });
     const latest = sorted[0];
 
     // Compute total volume
@@ -186,9 +190,11 @@ app.get("/api/user-stats/:userId", async (req, res) => {
       latest.exercises.forEach((ex: any) => {
         if (ex.sets && Array.isArray(ex.sets)) {
           ex.sets.forEach((s: any) => {
-            const w = parseFloat(s.weight) || 0;
-            const r = parseInt(s.reps) || 0;
-            volume += w * r;
+            if (s.completed) {
+              const w = parseFloat(s.weight) || 0;
+              const r = parseInt(s.reps) || 0;
+              volume += w * r;
+            }
           });
         }
       });
@@ -483,10 +489,11 @@ app.post("/api/workouts/save/:workoutId", async (req, res) => {
 
   if (supabase) {
     try {
+      const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
       const { error } = await supabase
         .from("workouts")
         .update({ exercises })
-        .eq("id", workoutId);
+        .eq("id", parsedWorkoutId);
       if (error) throw error;
     } catch (err) {
       console.warn("Supabase save exercises failed", err);
@@ -517,6 +524,7 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
 
   if (supabase) {
     try {
+      const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
       const { error } = await supabase
         .from("workouts")
         .update({
@@ -524,19 +532,20 @@ app.post("/api/workouts/finish/:workoutId", async (req, res) => {
           end_time: endTime,
           exercises: workout.exercises
         })
-        .eq("id", workoutId);
+        .eq("id", parsedWorkoutId);
       if (error) throw error;
     } catch (err: any) {
       console.warn("Supabase finish workout failed, retrying without exercises column:", err);
       if (err?.message?.includes("exercises") || err?.code === "PGRST204") {
         try {
+          const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
           await supabase
             .from("workouts")
             .update({
               status: "finished",
               end_time: endTime
             })
-            .eq("id", workoutId);
+            .eq("id", parsedWorkoutId);
           console.log("Supabase finish workout retry (without exercises) succeeded!");
         } catch (retryErr) {
           console.error("Supabase finish workout retry failed:", retryErr);
@@ -614,7 +623,11 @@ app.get("/api/workouts/:userId", async (req, res) => {
   // Sort history: finished first, descending by start_time
   const history = workouts
     .filter((w: any) => w.status === "finished")
-    .sort((a: any, b: any) => new Date(b.end_time).getTime() - new Date(a.end_time).getTime());
+    .sort((a: any, b: any) => {
+      const dateA = new Date(a.end_time || a.start_time || 0).getTime();
+      const dateB = new Date(b.end_time || b.start_time || 0).getTime();
+      return dateB - dateA;
+    });
 
   res.json(history);
 });
@@ -627,10 +640,11 @@ app.get("/api/measurements/delta/:userId", async (req, res) => {
   let measurements = [];
   if (supabase) {
     try {
+      const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
       const { data, error } = await supabase
         .from("measurements")
         .select("*")
-        .eq("user_id", userId);
+        .eq("user_id", parsedUserId);
 
       if (error) throw error;
       measurements = (data || []).map((m: any) => ({
@@ -737,10 +751,11 @@ app.delete("/api/workouts/:id", async (req, res) => {
 
   if (supabase) {
     try {
+      const parsedWorkoutId = /^\d+$/.test(String(workoutId)) ? parseInt(String(workoutId)) : workoutId;
       const { error } = await supabase
         .from("workouts")
         .delete()
-        .eq("id", workoutId);
+        .eq("id", parsedWorkoutId);
       if (error) throw error;
     } catch (err) {
       console.warn("Supabase delete workout failed", err);
