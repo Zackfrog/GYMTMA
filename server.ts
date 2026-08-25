@@ -124,6 +124,46 @@ async function sendTelegramNotification(userId: string | number, message: string
   }
 }
 
+// Map database workouts to standard format with auto-fallback for muscle_groups
+function mapSupabaseWorkout(supW: any, localDB: any) {
+  const localW = localDB.workouts.find((lw: any) => String(lw.id) === String(supW.id));
+  
+  let muscle_groups = [];
+  
+  // 1. Try native muscle_groups column first
+  if (supW.muscle_groups) {
+    if (Array.isArray(supW.muscle_groups)) {
+      muscle_groups = supW.muscle_groups;
+    } else {
+      try {
+        muscle_groups = typeof supW.muscle_groups === "string" ? JSON.parse(supW.muscle_groups) : supW.muscle_groups;
+      } catch (e) {
+        muscle_groups = [];
+      }
+    }
+  }
+  
+  // 2. Fallback to parsing note column
+  if ((!Array.isArray(muscle_groups) || muscle_groups.length === 0) && supW.note) {
+    try {
+      muscle_groups = JSON.parse(supW.note);
+    } catch (e) {
+      muscle_groups = supW.note ? supW.note.split(", ") : [];
+    }
+  }
+  
+  // 3. Fallback to local DB cache
+  if (!Array.isArray(muscle_groups) || muscle_groups.length === 0) {
+    muscle_groups = (localW && localW.muscle_groups) ? localW.muscle_groups : [];
+  }
+  
+  return {
+    ...supW,
+    muscle_groups,
+    exercises: supW.exercises || (localW ? localW.exercises : [])
+  };
+}
+
 // API Routes
 
 // 1. GET User Statistics
@@ -146,13 +186,7 @@ app.get("/api/user-stats/:userId", async (req, res) => {
         .order("start_time", { ascending: false });
 
       if (error) throw error;
-      const supWorkouts = (data || []).map((supW: any) => {
-        const localW = localDB.workouts.find((lw: any) => String(lw.id) === String(supW.id));
-        return {
-          ...supW,
-          exercises: supW.exercises || (localW ? localW.exercises : [])
-        };
-      });
+      const supWorkouts = (data || []).map((supW: any) => mapSupabaseWorkout(supW, localDB));
       const supIds = new Set(supWorkouts.map((w: any) => String(w.id)));
       const localOnly = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId) && !supIds.has(String(w.id)));
       workouts = [...supWorkouts, ...localOnly];
@@ -422,48 +456,60 @@ app.post("/api/workouts/start/:userId", async (req, res) => {
         .eq("status", "active");
 
       // Insert WITHOUT specifying 'id' so Supabase auto-generates a valid serial id
-      const { data, error } = await supabase
-        .from("workouts")
-        .insert({
-          user_id: parsedUserId,
-          start_time: newWorkout.start_time,
-          status: newWorkout.status,
-          muscle_groups: newWorkout.muscle_groups,
-          exercises: newWorkout.exercises
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-      
-      if (data && data.id) {
-        newWorkout.id = String(data.id);
-        console.log(`Supabase generated workout ID: ${newWorkout.id}`);
-      }
-    } catch (err: any) {
-      console.warn("Supabase insert workout failed, retrying without exercises column:", err);
+      let insertResult;
       try {
-        const parsedUserId = /^\d+$/.test(String(userId)) ? parseInt(String(userId)) : userId;
-        const { data, error } = await supabase
+        // 1. Try clean INSERT using native 'muscle_groups' column and 'exercises'
+        insertResult = await supabase
           .from("workouts")
           .insert({
             user_id: parsedUserId,
             start_time: newWorkout.start_time,
             status: newWorkout.status,
-            muscle_groups: newWorkout.muscle_groups
+            muscle_groups: newWorkout.muscle_groups,
+            exercises: newWorkout.exercises
           })
           .select()
           .single();
-
-        if (error) throw error;
-        if (data && data.id) {
-          newWorkout.id = String(data.id);
-          console.log(`Supabase generated workout ID (retry): ${newWorkout.id}`);
+        if (insertResult.error) throw insertResult.error;
+      } catch (firstErr: any) {
+        console.warn("Primary clean insert failed, retrying with note serialization:", firstErr.message || firstErr);
+        try {
+          // 2. Fallback: serialize muscle_groups into the 'note' column
+          insertResult = await supabase
+            .from("workouts")
+            .insert({
+              user_id: parsedUserId,
+              start_time: newWorkout.start_time,
+              status: newWorkout.status,
+              note: JSON.stringify(newWorkout.muscle_groups || []),
+              exercises: newWorkout.exercises
+            })
+            .select()
+            .single();
+          if (insertResult.error) throw insertResult.error;
+        } catch (secondErr: any) {
+          console.warn("Secondary insert failed, retrying minimal insert without exercises:", secondErr.message || secondErr);
+          // 3. Last Resort Fallback: minimal insert, serializing muscle_groups to note
+          insertResult = await supabase
+            .from("workouts")
+            .insert({
+              user_id: parsedUserId,
+              start_time: newWorkout.start_time,
+              status: newWorkout.status,
+              note: JSON.stringify(newWorkout.muscle_groups || [])
+            })
+            .select()
+            .single();
+          if (insertResult.error) throw insertResult.error;
         }
-        console.log("Supabase insert workout retry (without exercises) succeeded!");
-      } catch (retryErr) {
-        console.error("Supabase insert workout retry failed:", retryErr);
       }
+
+      if (insertResult && insertResult.data && insertResult.data.id) {
+        newWorkout.id = String(insertResult.data.id);
+        console.log(`Supabase generated workout ID: ${newWorkout.id}`);
+      }
+    } catch (err: any) {
+      console.error("Supabase insert workout failed entirely:", err);
     }
   }
 
@@ -616,13 +662,7 @@ app.get("/api/workouts/:userId", async (req, res) => {
         .order("start_time", { ascending: false });
 
       if (error) throw error;
-      const supWorkouts = (data || []).map((supW: any) => {
-        const localW = localDB.workouts.find((lw: any) => String(lw.id) === String(supW.id));
-        return {
-          ...supW,
-          exercises: supW.exercises || (localW ? localW.exercises : [])
-        };
-      });
+      const supWorkouts = (data || []).map((supW: any) => mapSupabaseWorkout(supW, localDB));
       const supIds = new Set(supWorkouts.map((w: any) => String(w.id)));
       const localOnly = localDB.workouts.filter((w: any) => String(w.user_id) === String(userId) && !supIds.has(String(w.id)));
       workouts = [...supWorkouts, ...localOnly];
